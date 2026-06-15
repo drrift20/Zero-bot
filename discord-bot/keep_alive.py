@@ -15,5 +15,5 @@ def health():
 
 
 def keep_alive():
-    thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True)
+    thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=5001), daemon=True)
     thread.start()

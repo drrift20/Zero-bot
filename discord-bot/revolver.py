@@ -11,15 +11,15 @@ import asyncio
 import logging
 import os
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types as genai_types
 from groq import Groq
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-2.0-flash"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
-# HTTP status codes / exception substrings that indicate a rate limit
 _RATE_LIMIT_SIGNALS = (
     "429",
     "quota",
@@ -35,32 +35,35 @@ def _is_rate_limit(exc: Exception) -> bool:
 
 
 async def _call_gemini(api_key: str, prompt: str, system_prompt: str | None) -> str:
-    """Call Gemini synchronously in a thread so the event loop stays free."""
+    """Call Gemini asynchronously using the google-genai SDK."""
 
-    def _sync():
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
+    def _sync() -> str:
+        client = genai.Client(api_key=api_key)
+        config = genai_types.GenerateContentConfig(
             system_instruction=system_prompt or "You are Zero, a helpful Discord bot.",
         )
-        response = model.generate_content(prompt)
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=config,
+        )
         return response.text
 
     return await asyncio.to_thread(_sync)
 
 
 async def _call_groq(api_key: str, prompt: str, system_prompt: str | None) -> str:
-    """Call Groq synchronously in a thread so the event loop stays free."""
+    """Call Groq asynchronously."""
 
-    def _sync():
+    def _sync() -> str:
         client = Groq(api_key=api_key)
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        else:
-            messages.append({"role": "system", "content": "You are Zero, a helpful Discord bot."})
-        messages.append({"role": "user", "content": prompt})
-
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt or "You are Zero, a helpful Discord bot.",
+            },
+            {"role": "user", "content": prompt},
+        ]
         completion = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
@@ -88,7 +91,7 @@ class Revolver:
         """
         Send *prompt* to the first available provider.
         Falls through to the next provider only on rate-limit / quota errors.
-        Other errors (bad key, network, etc.) propagate immediately.
+        Other errors propagate immediately.
         """
         # --- Attempt 1: Gemini key 1 ---
         if self.gemini_key_1:
@@ -97,9 +100,9 @@ class Revolver:
                 return await _call_gemini(self.gemini_key_1, prompt, system_prompt)
             except Exception as exc:
                 if _is_rate_limit(exc):
-                    logger.warning("Revolver: GEMINI_KEY_1 rate-limited, switching to GEMINI_KEY_2")
+                    logger.warning("Revolver: GEMINI_KEY_1 rate-limited → GEMINI_KEY_2")
                 else:
-                    logger.error("Revolver: GEMINI_KEY_1 failed (%s), switching to GEMINI_KEY_2", exc)
+                    logger.error("Revolver: GEMINI_KEY_1 failed (%s) → GEMINI_KEY_2", exc)
 
         # --- Attempt 2: Gemini key 2 ---
         if self.gemini_key_2:
@@ -108,9 +111,9 @@ class Revolver:
                 return await _call_gemini(self.gemini_key_2, prompt, system_prompt)
             except Exception as exc:
                 if _is_rate_limit(exc):
-                    logger.warning("Revolver: GEMINI_KEY_2 rate-limited, falling back to Groq")
+                    logger.warning("Revolver: GEMINI_KEY_2 rate-limited → Groq")
                 else:
-                    logger.error("Revolver: GEMINI_KEY_2 failed (%s), falling back to Groq", exc)
+                    logger.error("Revolver: GEMINI_KEY_2 failed (%s) → Groq", exc)
 
         # --- Attempt 3: Groq ---
         if self.groq_key:
@@ -122,6 +125,6 @@ class Revolver:
                 raise RuntimeError(f"All Revolver providers exhausted. Last error: {exc}") from exc
 
         raise RuntimeError(
-            "Revolver: No API keys are configured. "
+            "Revolver: No API keys configured. "
             "Set GEMINI_KEY_1, GEMINI_KEY_2, and/or GROQ_KEY."
         )
