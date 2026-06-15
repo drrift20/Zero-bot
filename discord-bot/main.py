@@ -2,7 +2,7 @@
 Zero — Discord bot entry point.
 
 Start order:
-  1. Flask keep-alive server (background thread, port 8080)
+  1. Flask keep-alive server (background thread, port 5001)
   2. Discord bot (blocking, main thread)
 """
 
@@ -13,12 +13,11 @@ import os
 import discord
 from discord.ext import commands
 
+from conversation_manager import ConversationManager
 from keep_alive import keep_alive
 from revolver import Revolver
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -26,9 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("zero")
 
-# ---------------------------------------------------------------------------
-# Prefix — case-insensitive "zero " (any capitalisation + trailing space)
-# ---------------------------------------------------------------------------
+# ── Prefix — case-insensitive "zero " ─────────────────────────────────────────
 
 def get_prefix(bot: commands.Bot, message: discord.Message) -> list[str]:
     """Accept any capitalisation of 'zero ' as a valid prefix."""
@@ -37,9 +34,7 @@ def get_prefix(bot: commands.Bot, message: discord.Message) -> list[str]:
     return []
 
 
-# ---------------------------------------------------------------------------
-# Bot setup
-# ---------------------------------------------------------------------------
+# ── Intents & bot ─────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -47,17 +42,16 @@ intents.message_content = True
 bot = commands.Bot(
     command_prefix=get_prefix,
     intents=intents,
-    help_command=None,  # we provide our own
+    help_command=None,
     case_insensitive=True,
 )
 
-# Attach a shared Revolver instance so cogs can access it via bot.revolver
-bot.revolver = Revolver()  # type: ignore[attr-defined]
+# Attach shared singletons so all cogs can reach them via bot.*
+bot.revolver = Revolver()           # type: ignore[attr-defined]
+bot.conv_manager = ConversationManager()  # type: ignore[attr-defined]
 
 
-# ---------------------------------------------------------------------------
-# Lifecycle events
-# ---------------------------------------------------------------------------
+# ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 @bot.event
 async def on_ready() -> None:
@@ -76,27 +70,27 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
         await ctx.reply("Unknown command. Try `zero help` for a list of commands.")
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.reply(f"Missing argument: `{error.param.name}`. Check `zero help`.")
+    elif isinstance(error, commands.MissingPermissions):
+        await ctx.reply("You don't have permission to use that command.")
     else:
         logger.error("Unhandled command error: %s", error)
         await ctx.reply("Something went wrong. Please try again.")
 
 
-# ---------------------------------------------------------------------------
-# Cog loader
-# ---------------------------------------------------------------------------
+# ── Cog loader ────────────────────────────────────────────────────────────────
 
 async def load_cogs() -> None:
     cogs = [
         "cogs.general",
+        "cogs.server_architect",
+        "cogs.bot_integrator",
     ]
     for cog in cogs:
         await bot.load_extension(cog)
         logger.info("Loaded cog: %s", cog)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 async def main() -> None:
     token = os.environ.get("DISCORD_TOKEN")
@@ -112,5 +106,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     keep_alive()
-    logger.info("Keep-alive server started on port 8080")
+    logger.info("Keep-alive server started on port 5001")
     asyncio.run(main())

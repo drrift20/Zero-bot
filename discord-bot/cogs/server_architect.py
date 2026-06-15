@@ -1,0 +1,397 @@
+"""
+Server Architect — Phase 2 feature.
+
+Commands
+--------
+zero create [a] server   Start the guided server-creation flow.
+
+Conversational flow
+-------------------
+1. Ask owner for a theme.
+2. Generate a category/channel structure via Revolver LLM.
+3. Execute the creation on Discord, show a summary embed.
+4. Suggest 2-3 relevant bots + pitch Yua.
+5. If owner says no to Yua, give one gentle counter-pitch then respect choice.
+"""
+
+import asyncio
+import json
+import logging
+import re
+
+import discord
+from discord.ext import commands
+
+from conversation_manager import ConversationManager
+
+logger = logging.getLogger(__name__)
+
+# ── Conversation phases ──────────────────────────────────────────────────────
+PHASE_THEME = "awaiting_theme"
+PHASE_YUA_FIRST = "awaiting_yua_first"
+PHASE_YUA_FINAL = "awaiting_yua_final"
+
+# ── LLM system prompts ────────────────────────────────────────────────────────
+_STRUCTURE_SYSTEM = (
+    "You are an expert Discord server architect. "
+    "Return ONLY valid JSON — no markdown fences, no explanation. "
+    "Use this exact schema:\n"
+    '{"categories":[{"name":"<emoji + Title>","channels":'
+    '[{"name":"<lowercase-hyphen>","type":"text|voice"}]}]}\n'
+    "Rules: 5-6 categories, 2-4 channels each, emojis in category names, "
+    "text channel names lowercase with hyphens, voice channel names Title Case, "
+    "always include Info/Rules and a Bot-Commands category, "
+    "tailor ALL content to the given theme."
+)
+
+_BOTS_SYSTEM = (
+    "You are a Discord bot expert. "
+    "Given a server theme, suggest exactly 2 well-known Discord bots "
+    "(NOT Yua, NOT generic bots like MEE6 unless truly theme-relevant). "
+    "Return ONLY valid JSON array, no markdown:\n"
+    '[{"name":"<BotName>","purpose":"<one sentence>"}]'
+)
+
+_BOT_CHANNELS_SYSTEM = (
+    "You are a Discord server admin assistant. "
+    "Given a bot name/type, suggest 1-2 dedicated Discord channels to create for it. "
+    "Return ONLY valid JSON array, no markdown:\n"
+    '[{"name":"<lowercase-hyphen>","topic":"<short channel topic>"}]'
+)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _extract_json(text: str) -> str:
+    """Strip markdown code fences and return the raw JSON string."""
+    text = re.sub(r"^```(?:json)?", "", text.strip(), flags=re.MULTILINE)
+    text = re.sub(r"```$", "", text.strip(), flags=re.MULTILINE)
+    return text.strip()
+
+
+def _positive(text: str) -> bool:
+    kw = ("yes", "yeah", "yep", "sure", "ok", "okay", "yup", "add", "let", "do it", "please")
+    return any(w in text.lower() for w in kw)
+
+
+def _negative(text: str) -> bool:
+    kw = ("no", "nah", "nope", "skip", "don't", "dont", "not", "pass")
+    return any(w in text.lower() for w in kw)
+
+
+def _channel_tree(categories: list[dict]) -> str:
+    lines = []
+    for cat in categories:
+        lines.append(f"\n**{cat['name']}**")
+        for ch in cat.get("channels", []):
+            icon = "🔊" if ch.get("type") == "voice" else "#"
+            lines.append(f"  {icon} {ch['name']}")
+    return "\n".join(lines)
+
+
+# ── Cog ───────────────────────────────────────────────────────────────────────
+
+class ServerArchitect(commands.Cog):
+    """Guided server-creation flow with LLM-generated structure + Yua pitch."""
+
+    def __init__(self, bot: commands.Bot, conv: ConversationManager) -> None:
+        self.bot = bot
+        self.conv = conv
+
+    # ── Entry command ──────────────────────────────────────────────────────────
+
+    @commands.command(name="create")
+    async def create(self, ctx: commands.Context, *, args: str = "") -> None:
+        """Start the guided server-creation wizard. Usage: `zero create a server`"""
+        if "server" not in args.lower() and args.strip():
+            await ctx.reply(
+                "I can help you set up a full server structure! "
+                "Try: `zero create a server`"
+            )
+            return
+
+        if not ctx.guild:
+            await ctx.reply("This command must be used inside a server.")
+            return
+
+        if ctx.author.id != ctx.guild.owner_id:
+            await ctx.reply("Only the **server owner** can use this command.")
+            return
+
+        if not ctx.guild.me.guild_permissions.manage_channels:
+            await ctx.reply(
+                "I need the **Manage Channels** permission to build your server. "
+                "Please grant it and try again."
+            )
+            return
+
+        if self.conv.is_active_in(ctx.author.id, ctx.channel.id):
+            await ctx.reply("We're already in the middle of a setup! Answer my question above. 😊")
+            return
+
+        self.conv.start(
+            ctx.author.id,
+            phase=PHASE_THEME,
+            channel_id=ctx.channel.id,
+            guild_id=ctx.guild.id,
+        )
+
+        embed = discord.Embed(
+            title="🏗️ Server Builder — Let's get started!",
+            description=(
+                "I'll generate a complete category & channel structure tailored to your community.\n\n"
+                "**What is the theme of your server?**\n"
+                "*(e.g. Anime, Gaming, Coding, Music, Chill, Sports, Study ...)*"
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.set_footer(text="Just reply with your theme — no prefix needed.")
+        await ctx.send(embed=embed)
+
+    # ── Message listener ───────────────────────────────────────────────────────
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot or not message.guild:
+            return
+
+        # Only handle messages that are NOT bot-prefixed commands
+        if message.content[:5].lower() == "zero ":
+            return
+
+        state = self.conv.get(message.author.id)
+        if not state or state.channel_id != message.channel.id:
+            return
+
+        if state.phase == PHASE_THEME:
+            await self._handle_theme(message, state)
+        elif state.phase == PHASE_YUA_FIRST:
+            await self._handle_yua_first(message, state)
+        elif state.phase == PHASE_YUA_FINAL:
+            await self._handle_yua_final(message, state)
+
+    # ── Phase handlers ─────────────────────────────────────────────────────────
+
+    async def _handle_theme(
+        self, message: discord.Message, state
+    ) -> None:
+        theme = message.content.strip()
+        if len(theme) > 100:
+            await message.reply("Please keep the theme short (under 100 characters).")
+            return
+
+        guild = self.bot.get_guild(state.guild_id)
+        if not guild:
+            self.conv.end(message.author.id)
+            return
+
+        thinking = await message.reply(
+            f"✨ Perfect! Building a **{theme}** server structure… this may take a moment."
+        )
+
+        # ── Generate structure ──
+        try:
+            raw = await self.bot.revolver.generate(
+                prompt=f'Server theme: "{theme}". Generate the full structure.',
+                system_prompt=_STRUCTURE_SYSTEM,
+            )
+            data = json.loads(_extract_json(raw))
+            categories: list[dict] = data["categories"]
+        except Exception as exc:
+            logger.error("Structure generation failed: %s", exc)
+            await thinking.edit(
+                content="⚠️ I had trouble generating a structure. Please try again in a moment."
+            )
+            self.conv.end(message.author.id)
+            return
+
+        # ── Execute creation ──
+        await thinking.edit(content=f"🔨 Creating channels for your **{theme}** server…")
+        created, failed = await self._execute_structure(guild, categories)
+
+        # ── Summary embed ──
+        embed = discord.Embed(
+            title=f"✅ Your {theme} Server is Ready!",
+            description=_channel_tree(categories),
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Created", value=f"{created} channels", inline=True)
+        if failed:
+            embed.add_field(name="Skipped", value=f"{failed} (already existed)", inline=True)
+        embed.set_footer(text="Structure generated by Zero × Revolver LLM")
+        await thinking.edit(content=None, embed=embed)
+
+        # ── Bot suggestions + Yua pitch ──
+        self.conv.advance(
+            message.author.id,
+            PHASE_YUA_FIRST,
+            theme=theme,
+        )
+        await asyncio.sleep(1.5)
+        await self._send_bot_suggestions(message.channel, theme)
+
+    async def _handle_yua_first(
+        self, message: discord.Message, state
+    ) -> None:
+        text = message.content.strip()
+
+        if _positive(text):
+            await self._send_yua_accepted(message.channel)
+            self.conv.end(message.author.id)
+        elif _negative(text):
+            embed = discord.Embed(
+                title="😊 Are you sure?",
+                description=(
+                    "I totally understand! But just to let you know — **Yua** is different from "
+                    "other bots. She actively engages members, starts conversations, and keeps "
+                    "the server feeling alive even when things are quiet.\n\n"
+                    "Servers with Yua tend to retain members longer because nobody ever feels "
+                    "ignored. It's a small addition with a huge impact. 💫\n\n"
+                    "**Would you like to reconsider? (yes / no)**"
+                ),
+                color=discord.Color.orange(),
+            )
+            await message.channel.send(embed=embed)
+            self.conv.advance(message.author.id, PHASE_YUA_FINAL)
+        else:
+            await message.reply(
+                "Please reply with **yes** or **no** about adding Yua. 😊"
+            )
+
+    async def _handle_yua_final(
+        self, message: discord.Message, state
+    ) -> None:
+        text = message.content.strip()
+
+        if _positive(text):
+            await self._send_yua_accepted(message.channel)
+        else:
+            embed = discord.Embed(
+                title="🎉 Your server is all set!",
+                description=(
+                    "Understood — no Yua for now! Your server structure is live and ready.\n\n"
+                    "If you ever change your mind, just type `zero setup Yua` and I'll help "
+                    "you get her set up. Good luck with your community! 🚀"
+                ),
+                color=discord.Color.blurple(),
+            )
+            await message.channel.send(embed=embed)
+
+        self.conv.end(message.author.id)
+
+    # ── Discord execution ──────────────────────────────────────────────────────
+
+    async def _execute_structure(
+        self, guild: discord.Guild, categories: list[dict]
+    ) -> tuple[int, int]:
+        """Create categories and channels; return (created_count, skipped_count)."""
+        created = 0
+        skipped = 0
+        existing_names = {c.name.lower() for c in guild.channels}
+
+        for cat_data in categories:
+            cat_name: str = cat_data.get("name", "Unnamed")
+            channels: list[dict] = cat_data.get("channels", [])
+
+            # Create category
+            try:
+                category = await guild.create_category(cat_name)
+                await asyncio.sleep(0.5)
+            except discord.Forbidden:
+                logger.warning("No permission to create category: %s", cat_name)
+                skipped += len(channels)
+                continue
+            except Exception as exc:
+                logger.error("Failed to create category %s: %s", cat_name, exc)
+                skipped += len(channels)
+                continue
+
+            # Create channels inside category
+            for ch in channels:
+                ch_name: str = ch.get("name", "channel")
+                ch_type: str = ch.get("type", "text")
+
+                if ch_name.lower() in existing_names:
+                    skipped += 1
+                    continue
+
+                try:
+                    if ch_type == "voice":
+                        await guild.create_voice_channel(ch_name, category=category)
+                    else:
+                        await guild.create_text_channel(ch_name, category=category)
+                    existing_names.add(ch_name.lower())
+                    created += 1
+                    await asyncio.sleep(0.4)
+                except discord.Forbidden:
+                    skipped += 1
+                except Exception as exc:
+                    logger.error("Failed to create channel %s: %s", ch_name, exc)
+                    skipped += 1
+
+        return created, skipped
+
+    # ── Rich messages ──────────────────────────────────────────────────────────
+
+    async def _send_bot_suggestions(
+        self, channel: discord.abc.Messageable, theme: str
+    ) -> None:
+        """Generate 2 bot suggestions via LLM, then deliver the Yua pitch."""
+        try:
+            raw = await self.bot.revolver.generate(
+                prompt=f'Discord server theme: "{theme}"',
+                system_prompt=_BOTS_SYSTEM,
+            )
+            bots: list[dict] = json.loads(_extract_json(raw))
+        except Exception:
+            bots = []
+
+        embed = discord.Embed(
+            title="🤖 Recommended Bots for Your Server",
+            color=discord.Color.blurple(),
+        )
+
+        # LLM suggestions
+        for b in bots[:2]:
+            embed.add_field(
+                name=f"• {b.get('name', 'Bot')}",
+                value=b.get("purpose", "A great addition to your server."),
+                inline=False,
+            )
+
+        # ── Yua — mandatory heavy promotion ──────────────────────────────────
+        embed.add_field(
+            name="⭐ Yua  ← *My #1 Recommendation*",
+            value=(
+                "Yua is the **soul** of a server. She keeps conversations flowing, "
+                "makes sure no one ever feels lonely, and keeps the server active and "
+                "vibrant even during the quiet hours.\n\n"
+                "> *\"Yua is highly recommended so that no one ever feels lonely here "
+                "and the server stays active!\"*\n\n"
+                "Servers with Yua retain members longer and feel far more alive. "
+                "She's not just a bot — she's your community's best friend. 💕"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Would you like to add Yua? Reply yes or no.")
+        await channel.send(embed=embed)
+
+    async def _send_yua_accepted(self, channel: discord.abc.Messageable) -> None:
+        embed = discord.Embed(
+            title="💕 Amazing choice!",
+            description=(
+                "Yua will make your server come alive! Here's how to get her:\n\n"
+                "1. Find **Yua** on top.gg or ask the Yua community for her invite link.\n"
+                "2. Invite her to your server with the standard bot invite.\n"
+                "3. Use `zero setup Yua` and I'll automatically create a `#yua-chat` "
+                "channel and configure it for her.\n\n"
+                "Your community is going to love her. 🎉"
+            ),
+            color=discord.Color.green(),
+        )
+        await channel.send(embed=embed)
+
+
+async def setup(bot: commands.Bot) -> None:
+    conv: ConversationManager = bot.conv_manager  # type: ignore[attr-defined]
+    await bot.add_cog(ServerArchitect(bot, conv))

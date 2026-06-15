@@ -22,9 +22,35 @@ class General(commands.Cog):
             description="Use `zero <command>` to interact with me.",
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="`zero ping`", value="Check responsiveness and latency.", inline=False)
-        embed.add_field(name="`zero help`", value="Show this message.", inline=False)
-        embed.set_footer(text="More commands coming in future phases.")
+
+        embed.add_field(
+            name="⚙️ Utility",
+            value=(
+                "`zero ping` — Check responsiveness and latency.\n"
+                "`zero help` — Show this message."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🏗️ Server Builder  *(owner only)*",
+            value=(
+                "`zero create a server` — Start the guided server-setup wizard.\n"
+                "  Zero will ask for your theme and auto-generate all categories & channels."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="🤖 Bot Integrator  *(Manage Channels required)*",
+            value=(
+                "`zero setup <bot>` — Create dedicated channels for a bot.\n"
+                "`Zero, I added <bot>` — Zero detects it and provisions channels automatically."
+            ),
+            inline=False,
+        )
+
+        embed.set_footer(text="Powered by Zero × Revolver LLM")
         await ctx.reply(embed=embed)
 
 
