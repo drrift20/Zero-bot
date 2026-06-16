@@ -12,7 +12,8 @@ class General(commands.Cog):
     async def ping(self, ctx: commands.Context) -> None:
         """Check bot latency and responsiveness."""
         latency_ms = round(self.bot.latency * 1000)
-        await ctx.reply(f"Pong! Latency: **{latency_ms} ms**")
+        db_status = "🟢 Connected" if self.bot.db.ready else "🔴 Disconnected"
+        await ctx.reply(f"Pong! Latency: **{latency_ms} ms** | Database: {db_status}")
 
     @commands.command(name="help")
     async def help_command(self, ctx: commands.Context) -> None:
@@ -26,17 +27,17 @@ class General(commands.Cog):
         embed.add_field(
             name="⚙️ Utility",
             value=(
-                "`zero ping` — Check responsiveness and latency.\n"
+                "`zero ping` — Latency check + database status.\n"
                 "`zero help` — Show this message."
             ),
             inline=False,
         )
 
         embed.add_field(
-            name="🏗️ Server Builder  *(owner only)*",
+            name="🏗️ Server Builder  *(owner or authorized)*",
             value=(
-                "`zero create a server` — Start the guided server-setup wizard.\n"
-                "  Zero will ask for your theme and auto-generate all categories & channels."
+                "`zero create a server` — Guided server-setup wizard.\n"
+                "  Zero asks for a theme and auto-generates all categories & channels."
             ),
             inline=False,
         )
@@ -45,12 +46,23 @@ class General(commands.Cog):
             name="🤖 Bot Integrator  *(Manage Channels required)*",
             value=(
                 "`zero setup <bot>` — Create dedicated channels for a bot.\n"
-                "`Zero, I added <bot>` — Zero detects it and provisions channels automatically."
+                "`Zero, I added <bot>` — Auto-detected; channels created instantly."
             ),
             inline=False,
         )
 
-        embed.set_footer(text="Powered by Zero × Revolver LLM")
+        embed.add_field(
+            name="🔑 Authorization  *(owner only)*",
+            value=(
+                "`zero authorize @user/role` — Grant Zero command access.\n"
+                "`zero deauthorize @user/role` — Revoke access.\n"
+                "`zero authorized` — List all authorized users & roles.\n"
+                "`zero bots` — List all bots Zero has integrated."
+            ),
+            inline=False,
+        )
+
+        embed.set_footer(text="Powered by Zero × Revolver LLM · Persistence by MongoDB")
         await ctx.reply(embed=embed)
 
 

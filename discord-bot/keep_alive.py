@@ -6,7 +6,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Zero is alive.", 200
+    return "Zero Bot is Running", 200
 
 
 @app.route("/health")
@@ -15,5 +15,8 @@ def health():
 
 
 def keep_alive():
-    thread = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=5001), daemon=True)
+    thread = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=8080),
+        daemon=True,
+    )
     thread.start()
