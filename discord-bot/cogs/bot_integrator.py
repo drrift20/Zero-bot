@@ -1,8 +1,13 @@
 """
-Bot Integrator — Phase 2 feature.
+Bot Integrator — Phase 2 + 3 feature.
 
 Listens for explicit bot-setup requests and automatically creates
 dedicated channels tailored to the named bot.
+
+Persistence (MongoDB)
+---------------------
+- Logs each integrated bot (name, channels created, requester) to custom_bots collection.
+- Deduplicates: updating the record if the bot was set up before.
 
 Triggers
 --------
@@ -11,10 +16,7 @@ Prefix commands:
 
 Natural-language (on_message, no prefix required):
   "Zero, I added <bot>"
-  "Zero I've added <bot>"
-  "Zero added <bot>"
-
-Detection works even if the user uses a comma after "Zero" or omits it.
+  "Zero, set up a music bot"
 """
 
 import asyncio
@@ -36,7 +38,6 @@ _BOT_CHANNELS_SYSTEM = (
     '[{"name":"<lowercase-hyphen>","topic":"<short channel topic string>"}]'
 )
 
-# Patterns for natural-language detection (after stripping the "zero[,]" prefix)
 _ADDED_PATTERN = re.compile(
     r"i(?:'ve|have)?\s+(?:just\s+)?added\s+(.+)",
     re.IGNORECASE,
@@ -54,16 +55,11 @@ def _extract_json(text: str) -> str:
 
 
 def _strip_zero_prefix(content: str) -> str | None:
-    """
-    If message starts with 'zero' (optionally followed by comma/space),
-    return the rest of the message. Otherwise return None.
-    """
     m = re.match(r"^zero[,\s]+(.+)", content.strip(), re.IGNORECASE)
     return m.group(1).strip() if m else None
 
 
 class BotIntegrator(commands.Cog):
-    """Detects bot-setup requests and provisions dedicated channels."""
 
     def __init__(self, bot: commands.Bot, conv: ConversationManager) -> None:
         self.bot = bot
@@ -72,6 +68,7 @@ class BotIntegrator(commands.Cog):
     # ── Explicit command ───────────────────────────────────────────────────────
 
     @commands.command(name="setup")
+    @commands.guild_only()
     @commands.has_permissions(manage_channels=True)
     async def setup_bot(self, ctx: commands.Context, *, bot_name: str) -> None:
         """Create dedicated channels for a specific bot. Usage: `zero setup <bot_name>`"""
@@ -82,7 +79,7 @@ class BotIntegrator(commands.Cog):
         if isinstance(error, commands.MissingRequiredArgument):
             await ctx.reply("Please specify a bot name. Example: `zero setup MEE6`")
         elif isinstance(error, commands.MissingPermissions):
-            await ctx.reply("You need the **Manage Channels** permission to use this command.")
+            await ctx.reply("You need **Manage Channels** permission to use this command.")
         else:
             logger.error("setup_bot error: %s", error)
             await ctx.reply("Something went wrong. Please try again.")
@@ -93,35 +90,26 @@ class BotIntegrator(commands.Cog):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild:
             return
-
-        # Skip if another cog is handling an active conversation for this user
         if self.conv.is_active_in(message.author.id, message.channel.id):
             return
 
-        # Only react if message begins with "zero[,] …"
+        # Only react to "zero[,] …" messages (NOT bare prefix commands)
         after = _strip_zero_prefix(message.content)
         if after is None:
             return
-
-        # Avoid double-processing actual prefix commands (handled by command system)
-        # "zero " prefix → command system already handles it; our interest is "zero, …"
         if message.content[:5].lower() == "zero " and not re.match(
             r"^zero,", message.content, re.IGNORECASE
         ):
             return
 
-        # Check for "I added <bot>"
         m = _ADDED_PATTERN.match(after)
         if m:
-            bot_name = m.group(1).strip().rstrip(".")
-            await self._confirm_and_provision(message, bot_name)
+            await self._confirm_and_provision(message, m.group(1).strip().rstrip("."))
             return
 
-        # Check for "set up <bot>"
         m = _SETUP_PATTERN.match(after)
         if m:
-            bot_name = m.group(1).strip().rstrip(".")
-            await self._confirm_and_provision(message, bot_name)
+            await self._confirm_and_provision(message, m.group(1).strip().rstrip("."))
             return
 
     # ── Core logic ────────────────────────────────────────────────────────────
@@ -129,16 +117,14 @@ class BotIntegrator(commands.Cog):
     async def _confirm_and_provision(
         self, message: discord.Message, bot_name: str
     ) -> None:
-        """Confirm the bot detection with the user, then provision."""
         if not message.guild.me.guild_permissions.manage_channels:
             await message.reply(
                 f"I noticed you added **{bot_name}**! "
-                "Unfortunately I need the **Manage Channels** permission to set up its channels."
+                "I need **Manage Channels** permission to set up its channels."
             )
             return
-
         await message.reply(
-            f"Got it! You've added **{bot_name}**. Let me set up a dedicated space for it… 🛠️"
+            f"Got it! You've added **{bot_name}**. Setting up a dedicated space… 🛠️"
         )
         await self._provision_bot(message.channel, message.guild, bot_name, message.author)
 
@@ -149,8 +135,7 @@ class BotIntegrator(commands.Cog):
         bot_name: str,
         requester: discord.Member,
     ) -> None:
-        """Ask LLM for channel suggestions, create them, and report back."""
-        # ── Generate channel suggestions ──
+        # ── Generate channel suggestions via LLM ──
         try:
             raw = await self.bot.revolver.generate(
                 prompt=f'Bot name / type: "{bot_name}"',
@@ -159,13 +144,14 @@ class BotIntegrator(commands.Cog):
             suggestions: list[dict] = json.loads(_extract_json(raw))
         except Exception as exc:
             logger.error("Bot channel generation failed for %s: %s", bot_name, exc)
-            # Fallback to a generic channel
             suggestions = [
-                {"name": f"{bot_name.lower().replace(' ', '-')}-commands",
-                 "topic": f"Commands for {bot_name}"}
+                {
+                    "name": f"{bot_name.lower().replace(' ', '-')}-commands",
+                    "topic": f"Commands for {bot_name}",
+                }
             ]
 
-        # ── Find or create a suitable category ──
+        # ── Find or create Bots category ──
         category = discord.utils.get(guild.categories, name="🤖 Bots & Utilities")
         if not category:
             try:
@@ -174,27 +160,23 @@ class BotIntegrator(commands.Cog):
             except discord.Forbidden:
                 category = None
 
-        # ── Create each suggested channel ──
+        # ── Create channels ──
         created_channels: list[str] = []
         skipped_channels: list[str] = []
-        existing_names = {c.name.lower() for c in guild.channels}
+        existing = {c.name.lower() for c in guild.channels}
 
         for s in suggestions[:2]:
             ch_name: str = s.get("name", "bot-commands")
             ch_topic: str = s.get("topic", "")
-
-            if ch_name.lower() in existing_names:
+            if ch_name.lower() in existing:
                 skipped_channels.append(ch_name)
                 continue
-
             try:
                 new_ch = await guild.create_text_channel(
-                    name=ch_name,
-                    category=category,
-                    topic=ch_topic,
+                    name=ch_name, category=category, topic=ch_topic
                 )
-                created_channels.append(new_ch.mention)
-                existing_names.add(ch_name.lower())
+                created_channels.append(new_ch.name)
+                existing.add(ch_name.lower())
                 await asyncio.sleep(0.4)
             except discord.Forbidden:
                 skipped_channels.append(ch_name)
@@ -202,16 +184,27 @@ class BotIntegrator(commands.Cog):
                 logger.error("Failed to create channel %s: %s", ch_name, exc)
                 skipped_channels.append(ch_name)
 
+        # ── Persist to MongoDB ──
+        await self.bot.db.log_custom_bot(
+            guild_id=guild.id,
+            bot_name=bot_name,
+            channels_created=created_channels,
+            added_by=requester.id,
+        )
+
         # ── Summary embed ──
         embed = discord.Embed(
             title=f"✅ {bot_name} is all set!",
+            description=(
+                f"I've prepared a dedicated space for **{bot_name}** in your server. "
+                "Configure the bot there and you're good to go! 🎉"
+            ),
             color=discord.Color.green(),
         )
-
         if created_channels:
             embed.add_field(
                 name="Created channels",
-                value="\n".join(created_channels),
+                value="\n".join(f"`#{c}`" for c in created_channels),
                 inline=False,
             )
         if skipped_channels:
@@ -220,12 +213,7 @@ class BotIntegrator(commands.Cog):
                 value=", ".join(f"`{n}`" for n in skipped_channels),
                 inline=False,
             )
-
-        embed.description = (
-            f"I've prepared a dedicated space for **{bot_name}** in your server. "
-            "Configure the bot there and you're good to go! 🎉"
-        )
-        embed.set_footer(text=f"Requested by {requester.display_name}")
+        embed.set_footer(text=f"Requested by {requester.display_name} · Saved to database")
         await channel.send(embed=embed)
 
 

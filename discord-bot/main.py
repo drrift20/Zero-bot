@@ -2,8 +2,9 @@
 Zero — Discord bot entry point.
 
 Start order:
-  1. Flask keep-alive server (background thread, port 5001)
-  2. Discord bot (blocking, main thread)
+  1. Flask keep-alive server (background thread, port 8080)
+  2. MongoDB connection (async, inside bot startup)
+  3. Discord bot (blocking, main thread)
 """
 
 import asyncio
@@ -14,6 +15,7 @@ import discord
 from discord.ext import commands
 
 from conversation_manager import ConversationManager
+from db import Database
 from keep_alive import keep_alive
 from revolver import Revolver
 
@@ -25,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("zero")
 
-# ── Prefix — case-insensitive "zero " ─────────────────────────────────────────
+# ── Prefix ────────────────────────────────────────────────────────────────────
 
 def get_prefix(bot: commands.Bot, message: discord.Message) -> list[str]:
     """Accept any capitalisation of 'zero ' as a valid prefix."""
@@ -34,7 +36,7 @@ def get_prefix(bot: commands.Bot, message: discord.Message) -> list[str]:
     return []
 
 
-# ── Intents & bot ─────────────────────────────────────────────────────────────
+# ── Bot setup ─────────────────────────────────────────────────────────────────
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -46,9 +48,10 @@ bot = commands.Bot(
     case_insensitive=True,
 )
 
-# Attach shared singletons so all cogs can reach them via bot.*
-bot.revolver = Revolver()           # type: ignore[attr-defined]
-bot.conv_manager = ConversationManager()  # type: ignore[attr-defined]
+# Shared singletons — accessible from all cogs via bot.*
+bot.revolver = Revolver()                # type: ignore[attr-defined]
+bot.conv_manager = ConversationManager() # type: ignore[attr-defined]
+bot.db = Database()                      # type: ignore[attr-defined]
 
 
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
@@ -84,6 +87,7 @@ async def load_cogs() -> None:
         "cogs.general",
         "cogs.server_architect",
         "cogs.bot_integrator",
+        "cogs.admin",
     ]
     for cog in cogs:
         await bot.load_extension(cog)
@@ -99,6 +103,16 @@ async def main() -> None:
             "DISCORD_TOKEN is not set. Add it as a secret in the Replit Secrets tab."
         )
 
+    # Connect to MongoDB (non-fatal — bot runs without DB if URI missing/bad)
+    mongo_uri = os.environ.get("MONGO_URI")
+    if mongo_uri:
+        try:
+            await bot.db.init(mongo_uri)
+        except Exception as exc:
+            logger.error("MongoDB connection failed: %s — running without persistence.", exc)
+    else:
+        logger.warning("MONGO_URI not set — running without persistence.")
+
     async with bot:
         await load_cogs()
         await bot.start(token)
@@ -106,5 +120,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     keep_alive()
-    logger.info("Keep-alive server started on port 5001")
+    logger.info("Keep-alive server started on port 8080")
     asyncio.run(main())

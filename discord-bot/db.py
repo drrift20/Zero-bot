@@ -7,11 +7,18 @@ guild_configs   — Per-guild settings: setup status, theme, authorized users/ro
 custom_bots     — Bots that have been integrated into a guild via Zero.
 
 All public methods are safe to call even when MongoDB is not configured;
-they log a warning and return neutral values so the bot still runs.
+they log a warning and return neutral values so the bot still runs without DB.
+
+TLS note
+--------
+Replit's NixOS OpenSSL 3.6.0 triggers TLSV1_ALERT_INTERNAL_ERROR when connecting
+to MongoDB Atlas clusters that enforce TLS 1.3 policy. Fix on the Atlas side:
+  Security → Advanced → Minimum TLS Version → set to TLS 1.2
+Once Atlas accepts TLS 1.2, the connection succeeds with standard certifi CA bundle.
 """
 
+import certifi
 import logging
-import os
 from datetime import datetime, timezone
 
 import motor.motor_asyncio
@@ -31,8 +38,11 @@ class Database:
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def init(self, uri: str) -> None:
-        self._client = motor.motor_asyncio.AsyncIOMotorClient(uri, serverSelectionTimeoutMS=5000)
-        # Ping to verify connection before we declare success
+        self._client = motor.motor_asyncio.AsyncIOMotorClient(
+            uri,
+            serverSelectionTimeoutMS=10000,
+            tlsCAFile=certifi.where(),
+        )
         await self._client.admin.command("ping")
         self._db = self._client["zero_bot"]
         await self._create_indexes()
@@ -75,13 +85,15 @@ class Database:
         )
 
     async def upsert_guild_config(self, guild_id: int, **fields) -> None:
-        """Create or partially update a guild config document."""
         if not self._check():
             return
         fields["updated_at"] = self._now()
         await self._db.guild_configs.update_one(
             {"guild_id": guild_id},
-            {"$set": fields, "$setOnInsert": {"guild_id": guild_id, "created_at": self._now()}},
+            {
+                "$set": fields,
+                "$setOnInsert": {"guild_id": guild_id, "created_at": self._now()},
+            },
             upsert=True,
         )
 
@@ -150,7 +162,6 @@ class Database:
         )
 
     async def is_authorized(self, guild_id: int, user_id: int, role_ids: list[int]) -> bool:
-        """Return True if user_id or any of their role_ids are authorized."""
         config = await self.get_guild_config(guild_id)
         if not config:
             return False

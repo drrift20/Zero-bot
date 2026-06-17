@@ -1,5 +1,5 @@
 """
-Server Architect — Phase 2 feature.
+Server Architect — Phase 2 + 3 feature.
 
 Commands
 --------
@@ -7,11 +7,16 @@ zero create [a] server   Start the guided server-creation flow.
 
 Conversational flow
 -------------------
-1. Ask owner for a theme.
+1. Ask owner (or authorized user) for a theme.
 2. Generate a category/channel structure via Revolver LLM.
 3. Execute the creation on Discord, show a summary embed.
 4. Suggest 2-3 relevant bots + pitch Yua.
-5. If owner says no to Yua, give one gentle counter-pitch then respect choice.
+5. If owner says no to Yua, give one gentle counter-pitch then respect.
+
+Persistence (MongoDB)
+---------------------
+- After successful creation, marks architect_run=True and stores theme in guild_configs.
+- Checks authorized users/roles alongside guild owner.
 """
 
 import asyncio
@@ -26,12 +31,12 @@ from conversation_manager import ConversationManager
 
 logger = logging.getLogger(__name__)
 
-# ── Conversation phases ──────────────────────────────────────────────────────
-PHASE_THEME = "awaiting_theme"
+# ── Phases ────────────────────────────────────────────────────────────────────
+PHASE_THEME     = "awaiting_theme"
 PHASE_YUA_FIRST = "awaiting_yua_first"
 PHASE_YUA_FINAL = "awaiting_yua_final"
 
-# ── LLM system prompts ────────────────────────────────────────────────────────
+# ── LLM prompts ───────────────────────────────────────────────────────────────
 _STRUCTURE_SYSTEM = (
     "You are an expert Discord server architect. "
     "Return ONLY valid JSON — no markdown fences, no explanation. "
@@ -52,31 +57,21 @@ _BOTS_SYSTEM = (
     '[{"name":"<BotName>","purpose":"<one sentence>"}]'
 )
 
-_BOT_CHANNELS_SYSTEM = (
-    "You are a Discord server admin assistant. "
-    "Given a bot name/type, suggest 1-2 dedicated Discord channels to create for it. "
-    "Return ONLY valid JSON array, no markdown:\n"
-    '[{"name":"<lowercase-hyphen>","topic":"<short channel topic>"}]'
-)
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _extract_json(text: str) -> str:
-    """Strip markdown code fences and return the raw JSON string."""
     text = re.sub(r"^```(?:json)?", "", text.strip(), flags=re.MULTILINE)
     text = re.sub(r"```$", "", text.strip(), flags=re.MULTILINE)
     return text.strip()
 
 
 def _positive(text: str) -> bool:
-    kw = ("yes", "yeah", "yep", "sure", "ok", "okay", "yup", "add", "let", "do it", "please")
-    return any(w in text.lower() for w in kw)
+    return any(w in text.lower() for w in ("yes", "yeah", "yep", "sure", "ok", "okay", "yup", "add", "let", "do it", "please"))
 
 
 def _negative(text: str) -> bool:
-    kw = ("no", "nah", "nope", "skip", "don't", "dont", "not", "pass")
-    return any(w in text.lower() for w in kw)
+    return any(w in text.lower() for w in ("no", "nah", "nope", "skip", "don't", "dont", "not", "pass"))
 
 
 def _channel_tree(categories: list[dict]) -> str:
@@ -92,41 +87,40 @@ def _channel_tree(categories: list[dict]) -> str:
 # ── Cog ───────────────────────────────────────────────────────────────────────
 
 class ServerArchitect(commands.Cog):
-    """Guided server-creation flow with LLM-generated structure + Yua pitch."""
 
     def __init__(self, bot: commands.Bot, conv: ConversationManager) -> None:
         self.bot = bot
         self.conv = conv
 
-    # ── Entry command ──────────────────────────────────────────────────────────
+    # ── Auth helper ───────────────────────────────────────────────────────────
+
+    async def _is_allowed(self, ctx: commands.Context) -> bool:
+        """Owner always allowed. Otherwise check MongoDB authorized list."""
+        if ctx.author.id == ctx.guild.owner_id:
+            return True
+        role_ids = [r.id for r in ctx.author.roles]
+        return await self.bot.db.is_authorized(ctx.guild.id, ctx.author.id, role_ids)
+
+    # ── Entry command ─────────────────────────────────────────────────────────
 
     @commands.command(name="create")
+    @commands.guild_only()
     async def create(self, ctx: commands.Context, *, args: str = "") -> None:
         """Start the guided server-creation wizard. Usage: `zero create a server`"""
         if "server" not in args.lower() and args.strip():
-            await ctx.reply(
-                "I can help you set up a full server structure! "
-                "Try: `zero create a server`"
-            )
+            await ctx.reply("I can help set up a full server! Try: `zero create a server`")
             return
 
-        if not ctx.guild:
-            await ctx.reply("This command must be used inside a server.")
-            return
-
-        if ctx.author.id != ctx.guild.owner_id:
-            await ctx.reply("Only the **server owner** can use this command.")
+        if not await self._is_allowed(ctx):
+            await ctx.reply("Only the **server owner** (or an authorized user) can use this command.")
             return
 
         if not ctx.guild.me.guild_permissions.manage_channels:
-            await ctx.reply(
-                "I need the **Manage Channels** permission to build your server. "
-                "Please grant it and try again."
-            )
+            await ctx.reply("I need the **Manage Channels** permission to build your server.")
             return
 
         if self.conv.is_active_in(ctx.author.id, ctx.channel.id):
-            await ctx.reply("We're already in the middle of a setup! Answer my question above. 😊")
+            await ctx.reply("We're already mid-setup! Just answer my question above. 😊")
             return
 
         self.conv.start(
@@ -141,21 +135,19 @@ class ServerArchitect(commands.Cog):
             description=(
                 "I'll generate a complete category & channel structure tailored to your community.\n\n"
                 "**What is the theme of your server?**\n"
-                "*(e.g. Anime, Gaming, Coding, Music, Chill, Sports, Study ...)*"
+                "*(e.g. Anime, Gaming, Coding, Music, Chill, Sports, Study …)*"
             ),
             color=discord.Color.blurple(),
         )
         embed.set_footer(text="Just reply with your theme — no prefix needed.")
         await ctx.send(embed=embed)
 
-    # ── Message listener ───────────────────────────────────────────────────────
+    # ── Message listener ──────────────────────────────────────────────────────
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or not message.guild:
             return
-
-        # Only handle messages that are NOT bot-prefixed commands
         if message.content[:5].lower() == "zero ":
             return
 
@@ -170,11 +162,9 @@ class ServerArchitect(commands.Cog):
         elif state.phase == PHASE_YUA_FINAL:
             await self._handle_yua_final(message, state)
 
-    # ── Phase handlers ─────────────────────────────────────────────────────────
+    # ── Phase: theme ──────────────────────────────────────────────────────────
 
-    async def _handle_theme(
-        self, message: discord.Message, state
-    ) -> None:
+    async def _handle_theme(self, message: discord.Message, state) -> None:
         theme = message.content.strip()
         if len(theme) > 100:
             await message.reply("Please keep the theme short (under 100 characters).")
@@ -189,7 +179,6 @@ class ServerArchitect(commands.Cog):
             f"✨ Perfect! Building a **{theme}** server structure… this may take a moment."
         )
 
-        # ── Generate structure ──
         try:
             raw = await self.bot.revolver.generate(
                 prompt=f'Server theme: "{theme}". Generate the full structure.',
@@ -199,42 +188,35 @@ class ServerArchitect(commands.Cog):
             categories: list[dict] = data["categories"]
         except Exception as exc:
             logger.error("Structure generation failed: %s", exc)
-            await thinking.edit(
-                content="⚠️ I had trouble generating a structure. Please try again in a moment."
-            )
+            await thinking.edit(content="⚠️ Trouble generating a structure. Please try again.")
             self.conv.end(message.author.id)
             return
 
-        # ── Execute creation ──
         await thinking.edit(content=f"🔨 Creating channels for your **{theme}** server…")
-        created, failed = await self._execute_structure(guild, categories)
+        created, skipped = await self._execute_structure(guild, categories)
 
-        # ── Summary embed ──
+        # ── Persist to MongoDB ──
+        await self.bot.db.mark_architect_run(guild.id, theme)
+
         embed = discord.Embed(
             title=f"✅ Your {theme} Server is Ready!",
             description=_channel_tree(categories),
             color=discord.Color.green(),
         )
         embed.add_field(name="Created", value=f"{created} channels", inline=True)
-        if failed:
-            embed.add_field(name="Skipped", value=f"{failed} (already existed)", inline=True)
-        embed.set_footer(text="Structure generated by Zero × Revolver LLM")
+        if skipped:
+            embed.add_field(name="Skipped", value=f"{skipped} (already existed)", inline=True)
+        embed.set_footer(text="Structure generated by Zero × Revolver LLM · Saved to database")
         await thinking.edit(content=None, embed=embed)
 
-        # ── Bot suggestions + Yua pitch ──
-        self.conv.advance(
-            message.author.id,
-            PHASE_YUA_FIRST,
-            theme=theme,
-        )
+        self.conv.advance(message.author.id, PHASE_YUA_FIRST, theme=theme)
         await asyncio.sleep(1.5)
         await self._send_bot_suggestions(message.channel, theme)
 
-    async def _handle_yua_first(
-        self, message: discord.Message, state
-    ) -> None:
-        text = message.content.strip()
+    # ── Phase: Yua first ask ──────────────────────────────────────────────────
 
+    async def _handle_yua_first(self, message: discord.Message, state) -> None:
+        text = message.content.strip()
         if _positive(text):
             await self._send_yua_accepted(message.channel)
             self.conv.end(message.author.id)
@@ -244,9 +226,9 @@ class ServerArchitect(commands.Cog):
                 description=(
                     "I totally understand! But just to let you know — **Yua** is different from "
                     "other bots. She actively engages members, starts conversations, and keeps "
-                    "the server feeling alive even when things are quiet.\n\n"
-                    "Servers with Yua tend to retain members longer because nobody ever feels "
-                    "ignored. It's a small addition with a huge impact. 💫\n\n"
+                    "the server feeling alive even during the quiet hours.\n\n"
+                    "Servers with Yua retain members longer because nobody ever feels ignored. "
+                    "It's a small addition with a huge impact. 💫\n\n"
                     "**Would you like to reconsider? (yes / no)**"
                 ),
                 color=discord.Color.orange(),
@@ -254,51 +236,41 @@ class ServerArchitect(commands.Cog):
             await message.channel.send(embed=embed)
             self.conv.advance(message.author.id, PHASE_YUA_FINAL)
         else:
-            await message.reply(
-                "Please reply with **yes** or **no** about adding Yua. 😊"
-            )
+            await message.reply("Please reply with **yes** or **no** about adding Yua. 😊")
 
-    async def _handle_yua_final(
-        self, message: discord.Message, state
-    ) -> None:
-        text = message.content.strip()
+    # ── Phase: Yua final ask ──────────────────────────────────────────────────
 
-        if _positive(text):
+    async def _handle_yua_final(self, message: discord.Message, state) -> None:
+        if _positive(message.content.strip()):
             await self._send_yua_accepted(message.channel)
         else:
             embed = discord.Embed(
                 title="🎉 Your server is all set!",
                 description=(
                     "Understood — no Yua for now! Your server structure is live and ready.\n\n"
-                    "If you ever change your mind, just type `zero setup Yua` and I'll help "
-                    "you get her set up. Good luck with your community! 🚀"
+                    "If you ever change your mind, just type `zero setup Yua` and I'll get her "
+                    "configured. Good luck with your community! 🚀"
                 ),
                 color=discord.Color.blurple(),
             )
             await message.channel.send(embed=embed)
-
         self.conv.end(message.author.id)
 
-    # ── Discord execution ──────────────────────────────────────────────────────
+    # ── Discord execution ─────────────────────────────────────────────────────
 
     async def _execute_structure(
         self, guild: discord.Guild, categories: list[dict]
     ) -> tuple[int, int]:
-        """Create categories and channels; return (created_count, skipped_count)."""
-        created = 0
-        skipped = 0
-        existing_names = {c.name.lower() for c in guild.channels}
+        created = skipped = 0
+        existing = {c.name.lower() for c in guild.channels}
 
         for cat_data in categories:
             cat_name: str = cat_data.get("name", "Unnamed")
             channels: list[dict] = cat_data.get("channels", [])
-
-            # Create category
             try:
                 category = await guild.create_category(cat_name)
                 await asyncio.sleep(0.5)
             except discord.Forbidden:
-                logger.warning("No permission to create category: %s", cat_name)
                 skipped += len(channels)
                 continue
             except Exception as exc:
@@ -306,21 +278,18 @@ class ServerArchitect(commands.Cog):
                 skipped += len(channels)
                 continue
 
-            # Create channels inside category
             for ch in channels:
                 ch_name: str = ch.get("name", "channel")
                 ch_type: str = ch.get("type", "text")
-
-                if ch_name.lower() in existing_names:
+                if ch_name.lower() in existing:
                     skipped += 1
                     continue
-
                 try:
                     if ch_type == "voice":
                         await guild.create_voice_channel(ch_name, category=category)
                     else:
                         await guild.create_text_channel(ch_name, category=category)
-                    existing_names.add(ch_name.lower())
+                    existing.add(ch_name.lower())
                     created += 1
                     await asyncio.sleep(0.4)
                 except discord.Forbidden:
@@ -331,12 +300,11 @@ class ServerArchitect(commands.Cog):
 
         return created, skipped
 
-    # ── Rich messages ──────────────────────────────────────────────────────────
+    # ── Rich messages ─────────────────────────────────────────────────────────
 
     async def _send_bot_suggestions(
         self, channel: discord.abc.Messageable, theme: str
     ) -> None:
-        """Generate 2 bot suggestions via LLM, then deliver the Yua pitch."""
         try:
             raw = await self.bot.revolver.generate(
                 prompt=f'Discord server theme: "{theme}"',
@@ -350,16 +318,12 @@ class ServerArchitect(commands.Cog):
             title="🤖 Recommended Bots for Your Server",
             color=discord.Color.blurple(),
         )
-
-        # LLM suggestions
         for b in bots[:2]:
             embed.add_field(
                 name=f"• {b.get('name', 'Bot')}",
                 value=b.get("purpose", "A great addition to your server."),
                 inline=False,
             )
-
-        # ── Yua — mandatory heavy promotion ──────────────────────────────────
         embed.add_field(
             name="⭐ Yua  ← *My #1 Recommendation*",
             value=(
@@ -383,8 +347,7 @@ class ServerArchitect(commands.Cog):
                 "Yua will make your server come alive! Here's how to get her:\n\n"
                 "1. Find **Yua** on top.gg or ask the Yua community for her invite link.\n"
                 "2. Invite her to your server with the standard bot invite.\n"
-                "3. Use `zero setup Yua` and I'll automatically create a `#yua-chat` "
-                "channel and configure it for her.\n\n"
+                "3. Use `zero setup Yua` and I'll create a `#yua-chat` channel for her.\n\n"
                 "Your community is going to love her. 🎉"
             ),
             color=discord.Color.green(),

@@ -1,4 +1,4 @@
-modules = ["nodejs-24", "python-3.11"]
+modules = ["nodejs-24"]
 
 [deployment]
 router = "application"
@@ -42,6 +42,7 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
+packages = ["cacert"]
 
 [[ports]]
 localPort = 5001
