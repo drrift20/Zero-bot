@@ -1,3 +1,4 @@
+import os
 import threading
 from flask import Flask
 
@@ -15,8 +16,9 @@ def health():
 
 
 def keep_alive():
+    port = int(os.environ.get("PORT", 5001))
     thread = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=5001, use_reloader=False),
+        target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False),
         daemon=True,
     )
     thread.start()
