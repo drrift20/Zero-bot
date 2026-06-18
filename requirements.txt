@@ -1,6 +1,7 @@
 discord.py
-google-generativeai
+google-genai
 groq
 motor
 flask
-google-generativeai
+certifi
+dnspython
