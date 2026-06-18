@@ -11,8 +11,7 @@ import asyncio
 import logging
 import os
 
-from google import genai
-from google.genai import types as genai_types
+import google.generativeai as genai
 from groq import Groq
 
 logger = logging.getLogger(__name__)
@@ -35,18 +34,15 @@ def _is_rate_limit(exc: Exception) -> bool:
 
 
 async def _call_gemini(api_key: str, prompt: str, system_prompt: str | None) -> str:
-    """Call Gemini asynchronously using the google-genai SDK."""
+    """Call Gemini asynchronously using the google-generativeai SDK."""
 
     def _sync() -> str:
-        client = genai.Client(api_key=api_key)
-        config = genai_types.GenerateContentConfig(
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL,
             system_instruction=system_prompt or "You are Zero, a helpful Discord bot.",
         )
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt,
-            config=config,
-        )
+        response = model.generate_content(prompt)
         return response.text
 
     return await asyncio.to_thread(_sync)
