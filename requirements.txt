@@ -1,0 +1,6 @@
+discord.py
+google-generativeai
+groq
+motor
+fastapi
+uvicorn
