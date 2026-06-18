@@ -1,0 +1,1 @@
+- [MongoDB Atlas TLS on Replit](mongodb-atlas-tls.md) — "TLS internal error" from Atlas is actually an IP block; fix is Network Access → Allow from Anywhere.
