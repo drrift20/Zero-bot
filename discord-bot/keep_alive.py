@@ -16,7 +16,7 @@ def health():
 
 
 def keep_alive():
-    port = int(os.environ.get("PORT", 5001))
+    port = int(os.getenv("PORT", 5001))
     thread = threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False),
         daemon=True,

@@ -5,5 +5,3 @@ motor
 flask
 certifi
 dnspython
-fastapi
-uvicorn
