@@ -2,21 +2,22 @@
 Zero — Discord bot entry point.
 
 Start order:
-  1. Flask keep-alive server (background thread, port 8080)
-  2. MongoDB connection (async, inside bot startup)
-  3. Discord bot (blocking, main thread)
+  1. Flask web server (background Thread) — binds PORT immediately for Render
+  2. Discord bot (main thread, bot.run) — keeps the process alive 24/7
+  MongoDB and cogs are loaded inside setup_hook before the bot connects.
 """
 
 import asyncio
 import logging
 import os
+from threading import Thread
 
 import discord
 from discord.ext import commands
+from flask import Flask
 
 from conversation_manager import ConversationManager
 from db import Database
-from keep_alive import keep_alive
 from revolver import Revolver
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -26,6 +27,21 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("zero")
+
+# ── Flask app ─────────────────────────────────────────────────────────────────
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Zero Bot is Running", 200
+
+@app.route("/health")
+def health():
+    return {"status": "ok", "bot": "Zero"}, 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5001))
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 # ── Prefix ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +70,32 @@ bot.conv_manager = ConversationManager() # type: ignore[attr-defined]
 bot.db = Database()                      # type: ignore[attr-defined]
 
 
+# ── setup_hook — runs before bot connects, inside the event loop ───────────────
+
+async def _setup_hook() -> None:
+    """Load cogs and connect to MongoDB before the bot goes online."""
+    cogs = [
+        "cogs.general",
+        "cogs.server_architect",
+        "cogs.bot_integrator",
+        "cogs.admin",
+    ]
+    for cog in cogs:
+        await bot.load_extension(cog)
+        logger.info("Loaded cog: %s", cog)
+
+    mongo_uri = os.environ.get("MONGO_URI")
+    if mongo_uri:
+        try:
+            await bot.db.init(mongo_uri)
+        except Exception as exc:
+            logger.error("MongoDB connection failed: %s — running without persistence.", exc)
+    else:
+        logger.warning("MONGO_URI not set — running without persistence.")
+
+bot.setup_hook = _setup_hook  # type: ignore[method-assign]
+
+
 # ── Lifecycle ─────────────────────────────────────────────────────────────────
 
 @bot.event
@@ -80,45 +122,14 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
         await ctx.reply("Something went wrong. Please try again.")
 
 
-# ── Cog loader ────────────────────────────────────────────────────────────────
-
-async def load_cogs() -> None:
-    cogs = [
-        "cogs.general",
-        "cogs.server_architect",
-        "cogs.bot_integrator",
-        "cogs.admin",
-    ]
-    for cog in cogs:
-        await bot.load_extension(cog)
-        logger.info("Loaded cog: %s", cog)
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
-
-async def main() -> None:
-    token = os.environ.get("DISCORD_TOKEN")
-    if not token:
-        raise EnvironmentError(
-            "DISCORD_TOKEN is not set. Add it as a secret in the Replit Secrets tab."
-        )
-
-    # Connect to MongoDB (non-fatal — bot runs without DB if URI missing/bad)
-    mongo_uri = os.environ.get("MONGO_URI")
-    if mongo_uri:
-        try:
-            await bot.db.init(mongo_uri)
-        except Exception as exc:
-            logger.error("MongoDB connection failed: %s — running without persistence.", exc)
-    else:
-        logger.warning("MONGO_URI not set — running without persistence.")
-
-    async with bot:
-        await load_cogs()
-        await bot.start(token)
-
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    keep_alive()
-    logger.info("Keep-alive server started on port 8080")
-    asyncio.run(main())
+    # 1. Start Flask in a background thread so Render port binds instantly
+    flask_thread = Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+
+    # 2. Run the Discord bot in the main thread to keep the application alive 24/7
+    print("Starting Discord Bot...")
+    bot.run(os.environ.get("DISCORD_TOKEN"))
