@@ -1,45 +1,44 @@
-# [Project name]
+# Zero — Discord Bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+An AI-powered Discord bot that helps server owners build their server from scratch. Provide a theme and Zero generates a full category/channel structure using AI, creates the channels automatically, and recommends bots (including Yua) to keep the community alive.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- `cd discord-bot && python main.py` — run the bot
+- The bot uses a Flask health-check server on port 5001 alongside the Discord bot process
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python 3.11
+- discord.py — Discord bot framework
+- Flask — lightweight health-check web server
+- Google Gemini (`gemini-2.0-flash`) — primary LLM provider
+- Groq (`llama-3.3-70b-versatile`) — fallback LLM provider
+- MongoDB (Motor async driver) — persistence for guild configs and bot logs
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `discord-bot/main.py` — entry point: starts Flask health server + Discord bot
+- `discord-bot/revolver.py` — cascading LLM failover (Gemini → Groq)
+- `discord-bot/db.py` — async MongoDB abstraction layer
+- `discord-bot/conversation_manager.py` — in-memory conversation state
+- `discord-bot/cogs/` — bot commands (server_architect, bot_integrator, admin, general)
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Revolver pattern: all LLM calls go through `Revolver.generate()` which cascades Gemini Key 1 → Gemini Key 2 → Groq on rate-limit errors.
+- Flask runs in a daemon thread so port binds immediately; Discord bot runs in the main thread.
+- MongoDB is optional — bot degrades gracefully if `MONGO_URI` is not set.
+- TLS note: MongoDB Atlas must allow TLS 1.2 (set in Atlas Security → Advanced → Minimum TLS Version) due to Replit's OpenSSL 3.6.0.
 
-## Product
+## Required Secrets
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- `DISCORD_TOKEN` — Discord bot token from the Discord Developer Portal
+- `GEMINI_KEY_1` — Primary Google Gemini API key
+- `GEMINI_KEY_2` — Secondary Google Gemini API key (failover)
+- `GROQ_KEY` — Groq API key (final fallback)
+- `MONGO_URI` — MongoDB Atlas connection string (optional, bot runs without it)
 
 ## User preferences
 
 _Populate as you build — explicit user instructions worth remembering across sessions._
-
-## Gotchas
-
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details

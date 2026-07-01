@@ -5,3 +5,8 @@ motor
 flask
 certifi
 dnspython
+email_validator
+flask
+flask-sqlalchemy
+gunicorn
+psycopg2-binary
