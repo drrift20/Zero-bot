@@ -1,10 +1,9 @@
 services:
-  - type: web
+  - type: worker
     name: zero-discord-bot
     runtime: python
-    rootDir: discord-bot
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    buildCommand: pip install -r discord-bot/requirements.txt
+    startCommand: cd discord-bot && python main.py
     envVars:
       - key: DISCORD_TOKEN
         sync: false
