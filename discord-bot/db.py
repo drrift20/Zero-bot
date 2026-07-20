@@ -3,7 +3,8 @@ db.py — MongoDB abstraction layer for Zero Bot.
 
 Collections
 -----------
-guild_configs   — Per-guild settings: setup status, theme, authorized users/roles.
+guild_configs   — Per-guild settings: setup status, theme, authorized users/roles,
+                  and IDs of every channel/category/role Zero created (for safe cleanup).
 custom_bots     — Bots that have been integrated into a guild via Zero.
 
 All public methods are safe to call even when MongoDB is not configured;
@@ -101,13 +102,44 @@ class Database:
         config = await self.get_guild_config(guild_id)
         return bool(config and config.get("architect_run"))
 
-    async def mark_architect_run(self, guild_id: int, theme: str) -> None:
+    async def mark_architect_run(
+        self,
+        guild_id: int,
+        theme: str,
+        created_category_ids: list[int] | None = None,
+        created_channel_ids: list[int] | None = None,
+        created_role_ids: list[int] | None = None,
+    ) -> None:
+        """
+        Record a successful architect run.
+
+        Stores the IDs of every category, channel, and role Zero created so they
+        can be safely identified and removed if the owner rebuilds with a new theme.
+        """
         await self.upsert_guild_config(
             guild_id,
             architect_run=True,
             theme=theme,
             architect_date=self._now(),
+            created_category_ids=created_category_ids or [],
+            created_channel_ids=created_channel_ids or [],
+            created_role_ids=created_role_ids or [],
         )
+
+    async def get_architect_snapshot(self, guild_id: int) -> dict:
+        """
+        Return the IDs of channels, categories, and roles Zero created in the last
+        architect run for this guild.  Returns an empty dict if no run is recorded
+        or if MongoDB is unavailable.
+        """
+        config = await self.get_guild_config(guild_id)
+        if not config:
+            return {}
+        return {
+            "created_category_ids": config.get("created_category_ids", []),
+            "created_channel_ids": config.get("created_channel_ids", []),
+            "created_role_ids": config.get("created_role_ids", []),
+        }
 
     # ── Authorized users & roles ──────────────────────────────────────────────
 
