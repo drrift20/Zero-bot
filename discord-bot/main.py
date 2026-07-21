@@ -10,6 +10,7 @@ Start order:
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from threading import Thread
 
 import discord
@@ -68,6 +69,7 @@ bot = commands.Bot(
 bot.revolver = Revolver()                # type: ignore[attr-defined]
 bot.conv_manager = ConversationManager() # type: ignore[attr-defined]
 bot.db = Database()                      # type: ignore[attr-defined]
+bot.start_time: datetime | None = None   # type: ignore[attr-defined]  set in on_ready
 
 
 # ── setup_hook — runs before bot connects, inside the event loop ───────────────
@@ -100,6 +102,7 @@ bot.setup_hook = _setup_hook  # type: ignore[method-assign]
 
 @bot.event
 async def on_ready() -> None:
+    bot.start_time = datetime.now(timezone.utc)  # type: ignore[attr-defined]
     logger.info("Zero is online as %s (ID: %s)", bot.user, bot.user.id)
     await bot.change_presence(
         activity=discord.Activity(

@@ -5,6 +5,9 @@ Priority order:
   1. Gemini via GEMINI_KEY_1
   2. Gemini via GEMINI_KEY_2
   3. Groq  via GROQ_KEY  (llama-3.3-70b-versatile)
+
+After every successful call, `last_used_provider` is updated so other parts
+of the bot (e.g. zero status) can report which provider is currently active.
 """
 
 import asyncio
@@ -80,24 +83,31 @@ class Revolver:
     Usage:
         revolver = Revolver()
         reply = await revolver.generate("What is 2 + 2?")
+
+    After every successful call `last_used_provider` holds the display name of
+    the provider that responded (e.g. "Gemini (Key 1)"), useful for status commands.
     """
 
     def __init__(self) -> None:
         self.gemini_key_1: str | None = os.environ.get("GEMINI_KEY_1")
         self.gemini_key_2: str | None = os.environ.get("GEMINI_KEY_2")
         self.groq_key: str | None = os.environ.get("GROQ_KEY")
+        self.last_used_provider: str = "Unknown"
 
     async def generate(self, prompt: str, system_prompt: str | None = None) -> str:
         """
         Send *prompt* to the first available provider.
         Falls through to the next provider only on rate-limit / quota errors.
         Other errors propagate immediately.
+        Updates `last_used_provider` on each successful call.
         """
         # --- Attempt 1: Gemini key 1 ---
         if self.gemini_key_1:
             try:
                 logger.debug("Revolver: trying GEMINI_KEY_1")
-                return await _call_gemini(self.gemini_key_1, prompt, system_prompt)
+                result = await _call_gemini(self.gemini_key_1, prompt, system_prompt)
+                self.last_used_provider = "Gemini (Key 1)"
+                return result
             except Exception as exc:
                 if _is_rate_limit(exc):
                     logger.warning("Revolver: GEMINI_KEY_1 rate-limited → GEMINI_KEY_2")
@@ -108,7 +118,9 @@ class Revolver:
         if self.gemini_key_2:
             try:
                 logger.debug("Revolver: trying GEMINI_KEY_2")
-                return await _call_gemini(self.gemini_key_2, prompt, system_prompt)
+                result = await _call_gemini(self.gemini_key_2, prompt, system_prompt)
+                self.last_used_provider = "Gemini (Key 2)"
+                return result
             except Exception as exc:
                 if _is_rate_limit(exc):
                     logger.warning("Revolver: GEMINI_KEY_2 rate-limited → Groq")
@@ -119,7 +131,9 @@ class Revolver:
         if self.groq_key:
             try:
                 logger.debug("Revolver: trying GROQ_KEY")
-                return await _call_groq(self.groq_key, prompt, system_prompt)
+                result = await _call_groq(self.groq_key, prompt, system_prompt)
+                self.last_used_provider = "Groq (llama-3.3-70b)"
+                return result
             except Exception as exc:
                 logger.error("Revolver: Groq also failed: %s", exc)
                 raise RuntimeError(f"All Revolver providers exhausted. Last error: {exc}") from exc
