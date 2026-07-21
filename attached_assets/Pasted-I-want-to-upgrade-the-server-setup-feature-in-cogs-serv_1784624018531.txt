@@ -1,0 +1,32 @@
+I want to upgrade the server-setup feature in cogs/server_architect.py with several new capabilities. IMPORTANT: Do not copy code from any external bot — design and implement everything fresh, matching our existing code style, naming conventions, and the bot's own personality/branding (Zero). Blend these with what we already have rather than replacing it wholesale.
+
+Please review the current implementation first, then implement the following:
+
+1. THREE-STAGE WORKFLOW (blend with existing preview/confirm flow)
+Split the current "generate + confirm button" flow into three distinct stages so users have more control:
+- A "design" step: user describes a theme/idea, bot generates a blueprint (categories, channels, roles, permissions) and stores it temporarily (per-user, per-guild) WITHOUT creating anything yet.
+- A "preview" step: shows the full current blueprint (can be re-run anytime to review what's currently planned).
+- A "build" step: actually applies the blueprint to the server (this is the only step that creates/modifies anything).
+Keep our existing Discord UI components (buttons/views) style for this if we already have them, just extend them to support re-previewing and building separately instead of one-shot confirm.
+
+2. INCREMENTAL MODIFY COMMAND
+Add a command that lets users request small changes to the CURRENT unbuilt blueprint without regenerating from scratch — e.g. "add a music-bot-commands channel" or "remove the memes category" or "rename the announcements channel". This should send the existing blueprint + the requested change to the AI, get back an updated blueprint, and update the stored draft. Show a short diff/summary of what changed (added/removed/renamed items) after each modify.
+
+3. BACKUP AND RESTORE SYSTEM
+Before any /build (or clean-slate style) operation that would delete or heavily modify existing channels/roles, automatically save a snapshot (category/channel/role names, types, positions, permissions) to the database, tied to guild ID and timestamp. Also add an explicit command to manually create a named backup anytime, and a restore command that lists available backups for the guild and lets the user pick one to restore from (recreate the saved structure). Store backups in db.py's existing schema style — extend it, don't replace it.
+
+4. STYLE PARAMETER
+Add an optional style/aesthetic parameter to the design step (e.g. Standard, Minimal, Professional, Aesthetic — or come up with names that fit Zero's own branding/voice if we want something distinct). This should influence how the AI generates channel names, emojis/formatting, and overall structure complexity, on top of the theme itself.
+
+5. EXPLICIT DESTRUCTIVE COMMAND (separate from normal build/update flow)
+Make sure any "wipe everything and start fresh" action is its OWN clearly-named, separate command (not something that happens silently as part of a normal theme update) — it should require the user to type a confirmation (e.g. re-type the server name, or a Yes/No button) and should trigger an automatic backup first (per point 3) before deleting anything. Normal theme updates/re-runs of build should NEVER delete existing user content unless this explicit command is used.
+
+6. STATUS/INFO IMPROVEMENTS
+Extend whatever health-check/info command we currently have (or add one if we don't) to show: which AI provider is currently active (from the revolver.py rotation system), bot version/uptime, and basic stats (servers count, etc) — styled in Zero's own voice/branding, not generic.
+
+General requirements:
+- Match existing code patterns in this repo (cogs structure, db.py conventions, error handling style already used elsewhere).
+- Add clear docstrings/comments since this is a growing codebase.
+- Update requirements.txt if any new dependency is needed.
+- Show me a plan/summary of the intended command names, database schema changes, and file changes BEFORE writing code, so I can review and approve.
+- After implementing, test that existing working features (theme build, role/channel creation from our last fix) still work correctly — don't break what's already working.
